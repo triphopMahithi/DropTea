@@ -1,3 +1,9 @@
+# DropTea !
+## hackathon.gemini3.devpost
+ [Hackathon ](https://gemini3.devpost.com/)
+
+---
+
 # 📦 DropTea - Windows Native Build Guide
 This guide details the build process for the Windows Native implementation of DropTea. The architecture consists of a high-performance Rust Core (compiled as a Dynamic Link Library) and a native C++ Wrapper for OS integration (handling Notifications/Toast).
 
