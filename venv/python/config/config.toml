@@ -1,0 +1,29 @@
+title = "DropTea P2P"
+
+[server]
+host = '0.0.0.0'
+port = 8080
+buffer_size = 65536
+timeout = 30
+
+# tcp, quic, plaintcp
+mode = "plaintcp"
+
+
+
+[storage]
+save_path = './downloads'
+temp_path = './temp'
+
+[protocol]
+header_format = "128sQ32s"
+header_size = 168
+
+# UUID Service : D7EA , Char. UUID : D7EB 
+[dev]
+enabled = true              # แสดงตัวเองหรือไม่ และ Bluetooth
+
+#  เพิ่มหมวดนี้
+[logging]
+debug = false                # ค่า Default: false = เงียบ (Production), true = พูดมาก (Dev)
+file_path = "logs/app.jsonl" # ที่เก็บไฟล์ Log

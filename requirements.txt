@@ -1,0 +1,10 @@
+markdown-it-py==4.0.0
+maturin==1.11.5
+mdurl==0.1.2
+prompt_toolkit==3.0.52
+Pygments==2.19.2
+rich==14.2.0
+wcwidth==0.2.14
+pywin32==311
+winshell==0.6
+psutil==7.2.1
