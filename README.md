@@ -88,3 +88,6 @@ dist/
 ├── droptea_core.dll        # Core Logic (Rust)
 └── downloads/              # Default download directory (Auto-created)
 ```
+
+# 💳 Credits
+[1] M. Boujemaoui, "WinToast," GitHub repository. [Online]. Available: https://github.com/mohabouje/WinToast. [Accessed: Dec. 12, 2025].
