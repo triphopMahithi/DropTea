@@ -1,29 +1,84 @@
-title = "DropTea P2P"
+# ==========================================
+# DropTea Configuration File (Production)
+# ==========================================
+# Best Practices:
+# - Use absolute paths for directories in production (e.g., /var/data/...)
+# - Ensure firewall rules allow traffic on the configured port.
+# ==========================================
 
+title = "DropTea P2P Transfer Node"
+version = "1.0.0"
+
+# ------------------------------------------------------------------
+# [Server] Network & Connection Settings
+# ------------------------------------------------------------------
 [server]
+# IP Address to bind the server to.
+# - "0.0.0.0"   : Listen on all network interfaces (Accessible from other devices).
+# - "127.0.0.1" : Listen on localhost only (Secure, but no external access).
 host = '0.0.0.0'
-port = 8080
+
+# The primary port for file transfers.
+# Ensure this port is not used by other system services.
+port = 0
+
+# Buffer size for file I/O operations (in Bytes).
+# - 65536 (64KB) : Standard default, balanced performance.
+# - 1048576 (1MB) : Better for high-speed LANs (1Gbps+), but uses more RAM.
 buffer_size = 65536
+
+# Connection timeout in seconds.
 timeout = 30
 
-# tcp, quic, plaintcp
+# Transport Protocol Mode.
+# - "tcp"  : Most stable, works on all networks (Recommended for general production).
+# - "quic" : High performance (UDP-based), reduces latency, but may be blocked by firewalls.
+# - "plaintcp" : Raw TCP without encryption (Cleartext).
+#                Best for: Debugging, trusted LANs, or low-power devices to save CPU.
+#                WARNING: Insecure! Data can be sniffed. DO NOT use over public networks.
 mode = "plaintcp"
 
-
-
+# ------------------------------------------------------------------
+# [Storage] File Management
+# ------------------------------------------------------------------
 [storage]
+# Directory where received files will be saved.
+# Recommendation: Use an absolute path in production environments.
 save_path = './downloads'
+
+# Temporary directory for file processing (e.g., unzip, chunks).
+# This folder is cleaned up after transfers.
 temp_path = './temp'
 
+# ------------------------------------------------------------------
+# [Logging] System Observability
+# ------------------------------------------------------------------
+[logging]
+# Log Verbosity Level.
+# - true  : Log everything (DEBUG). Useful for troubleshooting but consumes disk space.
+# - false : Log important events only (INFO/WARN). Recommended for Production.
+debug = false
+
+# Path to the log file.
+file_path = "logs/app.jsonl"
+
+# Log Rotation Settings (Prevent disk fill issues).
+max_size_mb = 10      # Max size (MB) per log file before rotation.
+backup_count = 5      # Number of old log files to keep.
+
+# ------------------------------------------------------------------
+# [Advanced] Protocol Packet Structure
+# ------------------------------------------------------------------
 [protocol]
+# Python struct format for packet headers (128s=Filename, Q=Size, 32s=Hash).
+# DO NOT CHANGE unless you are modifying the core protocol.
 header_format = "128sQ32s"
 header_size = 168
 
-# UUID Service : D7EA , Char. UUID : D7EB 
+# ------------------------------------------------------------------
+# [Development] Developer Settings
+# ------------------------------------------------------------------
 [dev]
-enabled = true              # แสดงตัวเองหรือไม่ และ Bluetooth
-
-#  เพิ่มหมวดนี้
-[logging]
-debug = false                # ค่า Default: false = เงียบ (Production), true = พูดมาก (Dev)
-file_path = "logs/app.jsonl" # ที่เก็บไฟล์ Log
+# Enable experimental features or debug UI.
+# MUST BE SET TO 'false' IN PRODUCTION.
+enabled = false
