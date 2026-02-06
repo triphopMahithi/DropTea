@@ -35,15 +35,16 @@ pub struct TcpTransport {
 
 impl TcpTransport {
     pub async fn new(
-        port: u16, 
+        _port: u16, 
         storage_path: &str, 
         node_name: &str,
-        config: Option<TcpConfig> // รับ Config
+        config: Option<TcpConfig>
     ) -> anyhow::Result<Self> {
         
         let config = config.unwrap_or_default();
-        let addr = format!("0.0.0.0:{}", port);
-        let listener = TcpListener::bind(&addr).await?;
+        
+        // 🟢 UPDATED: Bind Port 0 (OS สุ่มให้)
+        let listener = TcpListener::bind("0.0.0.0:0").await?;
         
         let (server_cfg, client_cfg) = security::build_tls_configs(storage_path, node_name)?;
         
@@ -55,15 +56,8 @@ impl TcpTransport {
         })
     }
 
-    // 🔥 TUNING STEP 2: Helper function สำหรับจูน Socket
     fn apply_socket_tuning(&self, stream: &TcpStream) -> anyhow::Result<()> {
-        // เรียกใช้ Tuning Logic จาก utils (ที่ใช้ socket2)
-        // สิ่งนี้จะตั้งค่า Buffer Size 2MB และ NoDelay
         crate::core::utils::apply_wifi_tuning(stream)?;
-
-        // Optional: KeepAlive
-        // (ปกติ socket2 ตั้ง keepalive ได้ แต่ถ้าอยากใช้ tokio-native ก็ทำตรงนี้เสริมได้)
-        
         Ok(())
     }
 }
@@ -75,7 +69,6 @@ impl Transport for TcpTransport {
     async fn accept(&self) -> anyhow::Result<(Self::Stream, std::net::SocketAddr)> {
         let (stream, addr) = self.listener.accept().await?;
         
-        // 🔥 Apply Tuning ทันทีที่รับ Connection
         if let Err(e) = self.apply_socket_tuning(&stream) {
             log::warn!("Failed to tune accepted TCP socket: {}", e);
         }
@@ -86,8 +79,6 @@ impl Transport for TcpTransport {
 
     async fn connect(&self, ip: &str, port: u16) -> anyhow::Result<Self::Stream> {
         let stream = TcpStream::connect((ip, port)).await?;
-        
-        // 🔥 Apply Tuning ทันทีที่ Connect ติด
         self.apply_socket_tuning(&stream)?;
 
         let domain = tokio_rustls::rustls::ServerName::try_from(ip)
@@ -95,5 +86,10 @@ impl Transport for TcpTransport {
             
         let tls_stream = self.connector.connect(domain, stream).await?;
         Ok(Box::new(tls_stream))
+    }
+
+    // 🟢 UPDATED: คืนค่า Port จริง
+    fn local_port(&self) -> u16 {
+        self.listener.local_addr().map(|a| a.port()).unwrap_or(0)
     }
 }

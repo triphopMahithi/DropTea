@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Instant, Duration};
-use std::net::{UdpSocket, IpAddr}; // 🟢 UPDATED: เพิ่ม IpAddr
+use std::net::{UdpSocket, IpAddr};
 use log::{info, error, debug, warn};
 use mdns_sd::{ServiceDaemon, ServiceInfo, ServiceEvent};
 use tokio::time::timeout;
@@ -25,9 +25,10 @@ use crate::core::utils;
 // ==========================================
 const DROPTEA_UUID_PART: &str = "d7ea";
 const DROPTEA_NAME_PREFIX: &str = "DT-";
-const HEALTH_CHECK_INTERVAL_SEC: u64 = 1; 
+const HEALTH_CHECK_INTERVAL_SEC: u64 = 5; 
 const PEER_STALE_THRESHOLD_SEC: u64 = 15; 
 const BLE_CACHE_TTL_MS: u128 = 1000;      
+const DEFAULT_HOTSPOT_GATEWAY: &str = "192.168.137.1";
 
 // ==========================================
 // 1. Data Structures
@@ -55,7 +56,7 @@ pub struct PeerInfo {
     pub id: String,
     pub name: String,
     pub display_name: String,
-    pub ip: Option<IpAddr>, // 🟢 UPDATED: เปลี่ยนจาก String เป็น IpAddr (Strong Type)
+    pub ip: Option<IpAddr>,
     pub port: u16,
     pub ssid: Option<String>,
     pub ble_mac: Option<String>,
@@ -108,6 +109,18 @@ impl<CB: TransferCallback + Clone + Send + Sync + 'static> DiscoveryEngine<CB> {
         }
     }
 
+    fn is_target_device(name: &str, services: &[uuid::Uuid]) -> bool {
+        if name.starts_with(DROPTEA_NAME_PREFIX) {
+            return true;
+        }
+        for uuid in services {
+            if uuid.to_string().to_lowercase().contains(DROPTEA_UUID_PART) {
+                return true;
+            }
+        }
+        false
+    }
+
     pub async fn run_health_check(&self) {
         loop {
             tokio::time::sleep(Duration::from_secs(HEALTH_CHECK_INTERVAL_SEC)).await;
@@ -122,7 +135,6 @@ impl<CB: TransferCallback + Clone + Send + Sync + 'static> DiscoveryEngine<CB> {
                 })
                 .map(|r| {
                     let p = r.value();
-                    // 🟢 UPDATED: p.ip เป็น IpAddr แล้ว unwrap ออกมาได้เลย
                     (p.id.clone(), p.ip.unwrap(), p.port, p.display_name.clone())
                 })
                 .collect();
@@ -134,7 +146,6 @@ impl<CB: TransferCallback + Clone + Send + Sync + 'static> DiscoveryEngine<CB> {
                 let cb_ref = self.callback.clone();
 
                 tokio::spawn(async move {
-                    // 🟢 UPDATED: Format รองรับทั้ง IPv4 และ IPv6
                     let addr = if ip.is_ipv6() {
                         format!("[{}]:{}", ip, port)
                     } else {
@@ -180,13 +191,12 @@ impl<CB: TransferCallback + Clone + Send + Sync + 'static> DiscoveryEngine<CB> {
         }
     }
 
-    pub async fn start(&self, device_id: String, port: u16, dev_mode: bool, mut rx: mpsc::Receiver<DiscoveryInternalEvent>) -> anyhow::Result<()> {
-
+    pub async fn start(&self, device_id: String, port: u16, mut rx: mpsc::Receiver<DiscoveryInternalEvent>) -> anyhow::Result<()> {
         let my_system_name = utils::get_system_name();
-        info!("🚀 Discovery Engine Starting: {} (DevMode: {})", my_system_name, dev_mode);
+        info!("🚀 Discovery Engine Starting: {}", my_system_name);
 
-        self.spawn_mdns_listener(device_id.clone(), port, my_system_name.clone(), dev_mode)?;
-        self.spawn_ble_listener(device_id.clone(), dev_mode).await?;
+        self.spawn_mdns_listener(device_id.clone(), port, my_system_name.clone())?;
+        self.spawn_ble_listener().await?;
 
         let peers = self.known_peers.clone();
         let cb = self.callback.clone();
@@ -195,11 +205,10 @@ impl<CB: TransferCallback + Clone + Send + Sync + 'static> DiscoveryEngine<CB> {
             while let Some(event) = rx.recv().await {
                 match event {
                     DiscoveryInternalEvent::MdnsFound { id, name, ip, port } => {
-                        // 🟢 UPDATED: แปลง String กลับเป็น IpAddr เพื่อความปลอดภัย
                         if let Ok(parsed_ip) = ip.parse::<IpAddr>() {
                             peers.entry(id.clone())
                                 .and_modify(|peer| {
-                                    peer.ip = Some(parsed_ip); // Store as IpAddr
+                                    peer.ip = Some(parsed_ip);
                                     peer.port = port;
                                     peer.last_seen = Instant::now();
                                     peer.missed_pings = 0;
@@ -219,7 +228,7 @@ impl<CB: TransferCallback + Clone + Send + Sync + 'static> DiscoveryEngine<CB> {
                                         id: id.clone(),
                                         name: name.clone(),
                                         display_name: name,
-                                        ip: Some(parsed_ip), // Store as IpAddr
+                                        ip: Some(parsed_ip),
                                         port,
                                         ssid: None,
                                         ble_mac: None,
@@ -230,7 +239,6 @@ impl<CB: TransferCallback + Clone + Send + Sync + 'static> DiscoveryEngine<CB> {
                                 });
                         }
                     },
-
                     DiscoveryInternalEvent::BleFound { id, name, ssid, mac } => {
                         if let Some(mut peer) = peers.get_mut(&id) {
                             peer.ssid = ssid.clone();
@@ -257,7 +265,6 @@ impl<CB: TransferCallback + Clone + Send + Sync + 'static> DiscoveryEngine<CB> {
                             });
                         }
                     },
-
                     DiscoveryInternalEvent::MdnsLost { id } => {
                         let mut remove = false;
                         if let Some(mut peer) = peers.get_mut(&id) {
@@ -282,57 +289,82 @@ impl<CB: TransferCallback + Clone + Send + Sync + 'static> DiscoveryEngine<CB> {
         Ok(())
     }
 
-    fn spawn_mdns_listener(&self, my_id: String, port: u16, my_name: String, dev_mode: bool) -> anyhow::Result<()> {
+    // ✅ FIXED: Dual Announcement (LAN + Hotspot) with Correct Logic
+    fn spawn_mdns_listener(&self, my_id: String, port: u16, my_name: String) -> anyhow::Result<()> {
         let tx = self.event_tx.clone();
         let daemon = self.daemon.clone();
-        let my_ip = Self::get_local_ip();
+        
+        // 1. หา IP หลัก (LAN/WiFi ปกติ)
+        let main_ip = Self::get_local_ip();
+        
+        // 2. สร้างรายการ IP ที่จะประกาศ (ประกาศครั้งเดียวตรงนี้)
+        let mut target_ips = vec![main_ip.clone()];
+
+        // 3. Logic สำหรับ Windows เท่านั้น (Mac/Linux จะมองไม่เห็น Block นี้)
+        #[cfg(target_os = "windows")]
+        {
+            // เช็คว่า IP หลักไม่ใช่ตัวเดียวกับ Hotspot (กันซ้ำ)
+            if main_ip != DEFAULT_HOTSPOT_GATEWAY {
+                target_ips.push(DEFAULT_HOTSPOT_GATEWAY.to_string());
+            }
+        }
 
         let service_type = "_droptea._tcp.local.";
-        let instance_name = format!("DropTea-{}", my_id);
-        let host_name = format!("{}.local.", my_id);
+        
+        // 4. วนลูปประกาศ Service แยกตาม IP
+        for ip in target_ips {
+            // ใช้ DEFAULT_HOTSPOT_GATEWAY เพื่อเช็คเงื่อนไข
+            let is_hotspot = ip == DEFAULT_HOTSPOT_GATEWAY;
+            
+            let suffix = if is_hotspot { "-HS" } else { "" };
+            let instance_name = format!("DropTea-{}{}", my_id, suffix);
+            let host_name = format!("{}.local.", my_id);
 
-        let mut properties = HashMap::new();
-        properties.insert("id".to_string(), my_id.clone());
-        properties.insert("ver".to_string(), "1.0".to_string());
-        properties.insert("name".to_string(), my_name);
+            let mut properties = HashMap::new();
+            properties.insert("id".to_string(), my_id.clone());
+            properties.insert("ver".to_string(), "1.0".to_string());
+            properties.insert("name".to_string(), my_name.clone());
+            properties.insert("type".to_string(), if is_hotspot { "hotspot" } else { "lan" }.to_string());
 
-        let my_info = ServiceInfo::new(
-            service_type, &instance_name, &host_name, &my_ip, port, properties
-        ).context("Failed to create ServiceInfo")?;
+            if let Ok(info) = ServiceInfo::new(
+                service_type,
+                &instance_name,
+                &host_name,
+                &ip, 
+                port,
+                properties
+            ) {
+                let _ = daemon.register(info);
+            }
+        }
 
-        daemon.register(my_info).context("Failed to register mDNS")?;
         let receiver = daemon.browse(service_type).context("Failed to browse mDNS")?;
+        
+        let my_id_clone = my_id.clone();
+        let my_main_ip = main_ip.clone(); 
+        let my_hotspot_ip = DEFAULT_HOTSPOT_GATEWAY.to_string();
 
         std::thread::spawn(move || {
             while let Ok(event) = receiver.recv() {
                 match event {
                     ServiceEvent::ServiceResolved(info) => {
-                        if !dev_mode && info.get_fullname().contains(&my_id) { continue; }
+                        if info.get_fullname().contains(&my_id_clone) { continue; }
 
-                        // 🟢 UPDATED: พยายามหา IPv4 ก่อนเป็นอันดับแรก เพื่อความเสถียรกับ Simulator
                         let best_ip = info.get_addresses().iter()
                             .find(|ip| ip.is_ipv4())          
                             .or_else(|| info.get_addresses().iter().next()); 
 
                         if let Some(ip) = best_ip {
                             let id = info.get_fullname().to_string();
-                            
-                            // 🟢 UPDATED: จัด Format IP ให้เป็น String ที่ถูกต้อง (เติม [] ถ้าเป็น IPv6)
-                            let ip_str = if ip.is_ipv6() {
-                                format!("[{}]", ip)
-                            } else {
-                                ip.to_string()
-                            };
-                            
+                            let ip_str = if ip.is_ipv6() { format!("[{}]", ip) } else { ip.to_string() };
                             let port = info.get_port();
                             let props = info.get_properties();
                             let raw_name = props.get("name").map(|v| v.to_string()).unwrap_or_else(|| "Unknown".to_string());
                             let clean_name = raw_name.split('=').last().unwrap_or(&raw_name).trim().to_string();
 
-                            // 🟢 UPDATED: อนุญาตให้ connect ตัวเองได้ถ้าเป็น Dev Mode (สำหรับ Simulator)
-                            // เช็คโดยการถอด [] ออกก่อนเทียบ
                             let clean_ip_str = ip_str.replace(&['[', ']'][..], "");
-                            if !dev_mode && clean_ip_str == my_ip { continue; }
+                            if clean_ip_str == my_main_ip { continue; }
+                            if clean_ip_str == my_hotspot_ip { continue; }
                             
                             let _ = tx.blocking_send(DiscoveryInternalEvent::MdnsFound { id, name: clean_name, ip: ip_str, port });
                         }
@@ -347,31 +379,9 @@ impl<CB: TransferCallback + Clone + Send + Sync + 'static> DiscoveryEngine<CB> {
         Ok(())
     }
 
-    async fn spawn_ble_listener(&self, my_id: String, dev_mode: bool) -> anyhow::Result<()> {
+    async fn spawn_ble_listener(&self) -> anyhow::Result<()> {
         let tx = self.event_tx.clone();
 
-        // 🟢 Branch 1: Dev Mode (Mock Data)
-        if dev_mode {
-            tokio::spawn(async move {
-                let mut counter = 0;
-                loop {
-                    if counter >= 5 { break; }
-                    tokio::time::sleep(Duration::from_secs(30)).await;
-                    counter += 1;
-                    let mock_id = format!("{}_mock_{}", my_id, counter);
-                    info!("🔧 [DevMode] Injecting Mock BLE Peer");
-                    let _ = tx.send(DiscoveryInternalEvent::BleFound {
-                        id: mock_id,
-                        name: format!("Mock Device #{}", counter),
-                        ssid: Some("Dev_WiFi_5G".to_string()),
-                        mac: "00:11:22:AA:BB:CC".to_string(),
-                    }).await;
-                }
-            });
-            return Ok(());
-        }
-
-        // 🟠 Branch 2: Production Mode (Real BLE)
         tokio::spawn(async move {
             let manager = match Manager::new().await { Ok(m) => m, Err(e) => { error!("BLE Init Error: {}", e); return; } };
             let adapters = match manager.adapters().await { Ok(a) => a, Err(e) => { error!("BLE Adapter Error: {}", e); return; } };
@@ -387,7 +397,7 @@ impl<CB: TransferCallback + Clone + Send + Sync + 'static> DiscoveryEngine<CB> {
                 return;
             }
 
-            info!("🔵 BLE Scanner Running (Filtering for '{}' or '{}')", DROPTEA_NAME_PREFIX, DROPTEA_UUID_PART);
+            info!("🔵 BLE Scanner Running (Production Mode)");
 
             let mut processed_cache: HashMap<String, Instant> = HashMap::new();
 
@@ -408,22 +418,7 @@ impl<CB: TransferCallback + Clone + Send + Sync + 'static> DiscoveryEngine<CB> {
                                 let mac = p.address().to_string();
                                 let services = props.services.clone();
 
-                                let mut is_target = false;
-
-                                if name.starts_with(DROPTEA_NAME_PREFIX) {
-                                    is_target = true;
-                                }
-
-                                if !is_target {
-                                    for uuid in &services {
-                                        if uuid.to_string().to_lowercase().contains(DROPTEA_UUID_PART) {
-                                            is_target = true;
-                                            break;
-                                        }
-                                    }
-                                }
-
-                                if is_target {
+                                if Self::is_target_device(&name, &services) {
                                     let display_name = if name == "Unknown" {
                                         "iPad/iPhone (DropTea)".to_string()
                                     } else {
@@ -452,5 +447,54 @@ impl<CB: TransferCallback + Clone + Send + Sync + 'static> DiscoveryEngine<CB> {
         });
 
         Ok(())
+    }
+}
+
+// ==========================================
+// 🧪 UNIT TESTS
+// ==========================================
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+    use std::str::FromStr;
+    use crate::core::transfer::CertificateAction; 
+
+    #[derive(Clone)]
+    struct MockCallback;
+    impl crate::core::transfer::TransferCallback for MockCallback {
+        fn on_start(&self, _: &str, _: &str) {}
+        fn on_progress(&self, _: &str, _: u64, _: u64) {} 
+        fn on_complete(&self, _: &str, _: &str) {}
+        fn on_error(&self, _: &str, _: &str) {}
+        fn on_peer_found(&self, _: &str, _: &str, _: &str, _: u16, _: Option<&str>, _: &str) {}
+        fn on_peer_lost(&self, _: &str) {}
+        
+        fn on_reject(&self, _: &str, _: &str) {}
+        fn ask_accept_file(&self, _: &str, _: &str, _: u64, _: &str, _: &str) -> anyhow::Result<bool> {
+            Ok(true) 
+        }
+        
+        fn ask_verify_certificate(&self, _: &str, _: &str, _: Option<&str>) -> anyhow::Result<CertificateAction> {
+            Ok(CertificateAction::Accept) 
+        }
+    }
+
+    #[test]
+    fn test_is_target_device_by_name() {
+        let services = vec![];
+        assert!(DiscoveryEngine::<MockCallback>::is_target_device("DT-iPhone", &services));
+        assert!(DiscoveryEngine::<MockCallback>::is_target_device("DT-MacBook", &services));
+        assert!(!DiscoveryEngine::<MockCallback>::is_target_device("iPhone-Somchai", &services));
+    }
+
+    #[test]
+    fn test_is_target_device_by_uuid() {
+        let valid_uuid = Uuid::from_str("0000d7ea-0000-1000-8000-00805f9b34fb").unwrap();
+        let invalid_uuid = Uuid::from_str("0000ffff-0000-1000-8000-00805f9b34fb").unwrap();
+
+        assert!(DiscoveryEngine::<MockCallback>::is_target_device("Unknown Device", &[valid_uuid]));
+        assert!(!DiscoveryEngine::<MockCallback>::is_target_device("Unknown Device", &[invalid_uuid]));
+        assert!(DiscoveryEngine::<MockCallback>::is_target_device("Unknown", &[invalid_uuid, valid_uuid]));
     }
 }

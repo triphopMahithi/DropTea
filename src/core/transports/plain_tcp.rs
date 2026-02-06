@@ -10,9 +10,10 @@ pub struct PlainTcpTransport {
 }
 
 impl PlainTcpTransport {
-    pub async fn new(port: u16) -> Result<Self> {
-        // Bind Port แบบ TCP ปกติ
-        let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
+    pub async fn new(_port: u16) -> Result<Self> {
+        // 🟢 UPDATED: Bind Port 0 (ให้ OS สุ่มให้) แทนที่จะใช้ port จาก config
+        // เพื่อป้องกันปัญหา Address already in use
+        let listener = TcpListener::bind("0.0.0.0:0").await?;
         Ok(Self { listener })
     }
 }
@@ -31,5 +32,10 @@ impl Transport for PlainTcpTransport {
         // เชื่อมต่อไปหาปลายทางแบบ TCP ปกติ
         let stream = TcpStream::connect(format!("{}:{}", ip, port)).await?;
         Ok(Box::new(stream))
+    }
+
+    // 🟢 UPDATED: คืนค่า Port จริงที่ OS สุ่มได้
+    fn local_port(&self) -> u16 {
+        self.listener.local_addr().map(|a| a.port()).unwrap_or(0)
     }
 }

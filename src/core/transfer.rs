@@ -20,6 +20,9 @@ pub trait Transport: Send + Sync + 'static {
     type Stream: DataStream;
     async fn accept(&self) -> anyhow::Result<(Self::Stream, std::net::SocketAddr)>;
     async fn connect(&self, ip: &str, port: u16) -> anyhow::Result<Self::Stream>;
+    
+    // 🟢 UPDATED: เพิ่มฟังก์ชันดึง Port จริงที่ OS สุ่มให้
+    fn local_port(&self) -> u16;
 }
 
 pub type DynStream = Box<dyn DataStream>;
@@ -35,8 +38,6 @@ pub struct FileHeader {
     pub sender_name: String,
     pub sender_device: String,
     
-    // 🔥 FIXED: เพิ่ม #[serde(default)] เพื่อให้รับ JSON จาก Swift ได้
-    // (เพราะ Swift อาจตัด field นี้ออกถ้าเป็น nil)
     #[serde(default)] 
     pub compression: Option<String>, 
 }

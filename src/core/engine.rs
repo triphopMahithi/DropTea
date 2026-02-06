@@ -4,7 +4,7 @@ use std::time::Duration;
 use tokio::runtime::Runtime;
 use tokio::sync::{Semaphore, Mutex as TokioMutex, mpsc};
 use tokio::time::Instant;
-use log::{info, error};
+use log::{info, error, warn};
 
 use crate::core::events::{TransferEvent, TransferEventHandler};
 use crate::core::transfer::{DynTransport, TransferCallback};
@@ -28,11 +28,43 @@ pub struct DropTeaConfig {
     pub dev_mode: bool,
 }
 
-pub struct ClientStat { pub count: u32, pub first_seen: Instant, pub banned_until: Option<Instant> }
-pub struct ConnectionGuard { pub clients: TokioMutex<HashMap<std::net::IpAddr, ClientStat>> }
+pub struct ClientStat { 
+    pub count: u32, 
+    pub first_seen: Instant, 
+    pub banned_until: Option<Instant> 
+}
+
+pub struct ConnectionGuard { 
+    pub clients: TokioMutex<HashMap<std::net::IpAddr, ClientStat>> 
+}
+
 impl ConnectionGuard {
-    pub fn new() -> Self { Self { clients: TokioMutex::new(HashMap::new()) } }
-    pub async fn check_access(&self, ip: std::net::IpAddr) -> bool { true }
+    pub fn new() -> Self { 
+        Self { clients: TokioMutex::new(HashMap::new()) } 
+    }
+    
+    pub async fn check_access(&self, ip: std::net::IpAddr) -> bool {
+        let mut guard = self.clients.lock().await;
+        
+        if let Some(stat) = guard.get_mut(&ip) {
+            if let Some(banned_until) = stat.banned_until {
+                if Instant::now() < banned_until {
+                    warn!("Access denied for banned IP: {}", ip);
+                    return false; 
+                } else {
+                    stat.banned_until = None; 
+                }
+            }
+            stat.count += 1;
+        } else {
+            guard.insert(ip, ClientStat {
+                count: 1,
+                first_seen: Instant::now(),
+                banned_until: None,
+            });
+        }
+        true
+    }
 }
 
 pub struct DropTeaCore {
@@ -58,21 +90,43 @@ impl TransferCallback for EventHandlerAdapter {
         self.0.on_event(TransferEvent::Incoming { task_id: task_id.to_string(), filename: data });
         Ok(false)
     }
-    fn on_start(&self, task_id: &str, filename: &str) { self.0.on_event(TransferEvent::Started { task_id: task_id.to_string(), msg: filename.to_string() }); }
-    fn on_progress(&self, task_id: &str, current: u64, total: u64) { self.0.on_event(TransferEvent::Progress { task_id: task_id.to_string(), current, total }); }
-    fn on_complete(&self, task_id: &str, info: &str) { self.0.on_event(TransferEvent::Completed { task_id: task_id.to_string(), info: info.to_string() }); }
-    fn on_error(&self, task_id: &str, error: &str) { self.0.on_event(TransferEvent::Error { task_id: task_id.to_string(), error: error.to_string() }); }
-    fn on_reject(&self, task_id: &str, reason: &str) { self.0.on_event(TransferEvent::Rejected { task_id: task_id.to_string(), reason: reason.to_string() }); }
-    fn on_peer_found(&self, id: &str, name: &str, ip: &str, port: u16, ssid: Option<&str>, transport: &str) {
-        self.0.on_event(TransferEvent::PeerFound { id: id.to_string(), name: name.to_string(), ip: ip.to_string(), port, ssid: ssid.map(|s| s.to_string()), transport: transport.to_string() });
+    fn on_start(&self, task_id: &str, filename: &str) { 
+        self.0.on_event(TransferEvent::Started { task_id: task_id.to_string(), msg: filename.to_string() }); 
     }
-    fn on_peer_lost(&self, id: &str) { self.0.on_event(TransferEvent::PeerLost { id: id.to_string() }); }
-    fn ask_verify_certificate(&self, _: &str, _: &str, _: Option<&str>) -> anyhow::Result<crate::core::transfer::CertificateAction> { Ok(crate::core::transfer::CertificateAction::Accept) }
+    fn on_progress(&self, task_id: &str, current: u64, total: u64) { 
+        self.0.on_event(TransferEvent::Progress { task_id: task_id.to_string(), current, total }); 
+    }
+    fn on_complete(&self, task_id: &str, info: &str) { 
+        self.0.on_event(TransferEvent::Completed { task_id: task_id.to_string(), info: info.to_string() }); 
+    }
+    fn on_error(&self, task_id: &str, error: &str) { 
+        self.0.on_event(TransferEvent::Error { task_id: task_id.to_string(), error: error.to_string() }); 
+    }
+    fn on_reject(&self, task_id: &str, reason: &str) { 
+        self.0.on_event(TransferEvent::Rejected { task_id: task_id.to_string(), reason: reason.to_string() }); 
+    }
+    fn on_peer_found(&self, id: &str, name: &str, ip: &str, port: u16, ssid: Option<&str>, transport: &str) {
+        self.0.on_event(TransferEvent::PeerFound { 
+            id: id.to_string(), 
+            name: name.to_string(), 
+            ip: ip.to_string(), 
+            port, 
+            ssid: ssid.map(|s| s.to_string()), 
+            transport: transport.to_string() 
+        });
+    }
+    fn on_peer_lost(&self, id: &str) { 
+        self.0.on_event(TransferEvent::PeerLost { id: id.to_string() }); 
+    }
+    fn ask_verify_certificate(&self, _: &str, _: &str, _: Option<&str>) -> anyhow::Result<crate::core::transfer::CertificateAction> { 
+        Ok(crate::core::transfer::CertificateAction::Accept) 
+    }
 }
 
 impl DropTeaCore {
     pub fn new_with_config(rt: Arc<Runtime>, config: DropTeaConfig, handler: Box<dyn TransferEventHandler>) -> anyhow::Result<Self> {
         let transport: Arc<DynTransport> = match config.mode {
+            // Note: config.port is passed but will be ignored by new logic in transports (they bind to 0)
             TransportMode::Tcp => Arc::new(rt.block_on(async { TcpTransport::new(config.port, &config.storage_path, &config.node_name, None).await })?),
             TransportMode::Quic => Arc::new(rt.block_on(async { QuicTransport::new(config.port, &config.storage_path, &config.node_name, None).await })?),
             TransportMode::PlainTcp => Arc::new(rt.block_on(async { PlainTcpTransport::new(config.port).await })?),
@@ -80,35 +134,58 @@ impl DropTeaCore {
 
         let h_arc = Arc::new(handler);
         let (discovery, rx) = DiscoveryEngine::new(EventHandlerAdapter(h_arc.clone()))?;
+        
         Ok(Self {
-            rt, handler: h_arc, transport, discovery, discovery_rx: StdMutex::new(Some(rx)),
+            rt, 
+            handler: h_arc, 
+            transport, 
+            discovery, 
+            discovery_rx: StdMutex::new(Some(rx)),
             guard: Arc::new(ConnectionGuard::new()),
             outgoing_limiter: Arc::new(Semaphore::new(50)),
-            incoming_limiter: Arc::new(Semaphore::new(5)), 
+            incoming_limiter: Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS)), 
             pending_transfers: Arc::new(StdMutex::new(HashMap::new())),
             node_name: config.node_name,
             dev_mode: config.dev_mode,
         })
     }
 
-    pub fn start_service(&self, port: u16) {
-        let rt = self.rt.clone(); let transport = self.transport.clone(); let h = self.handler.clone(); 
-        let guard = self.guard.clone(); let inc_lim = self.incoming_limiter.clone(); let p_map = self.pending_transfers.clone(); 
+    pub fn start_service(&self, _port: u16) { // Parameter renamed to _port as it's not used directly for binding
+        let rt = self.rt.clone(); 
+        let transport = self.transport.clone(); 
+        let h = self.handler.clone(); 
+        let guard = self.guard.clone(); 
+        let inc_lim = self.incoming_limiter.clone(); 
+        let p_map = self.pending_transfers.clone(); 
+        
+        // 🟢 UPDATED: ดึง Port จริงที่สุ่มได้จาก Transport
+        let actual_port = transport.local_port();
+        
         let save_path = "./downloads".to_string(); 
         let is_dev = self.dev_mode;
+        
         rt.spawn(async move {
-            h.on_event(TransferEvent::ServerStarted { port });
+            // 🟢 UPDATED: แจ้ง UI ว่า Server เริ่มแล้วที่ Port จริง
+            h.on_event(TransferEvent::ServerStarted { port: actual_port });
             loop {
                 match transport.accept().await {
                     Ok((stream, addr)) => {
-                        let h_c = h.clone(); let path = save_path.clone(); let lim = inc_lim.clone(); let map = p_map.clone();
+                        if !guard.check_access(addr.ip()).await {
+                            continue;
+                        }
+
+                        let h_c = h.clone(); 
+                        let path = save_path.clone(); 
+                        let lim = inc_lim.clone(); 
+                        let map = p_map.clone();
+                        
                         tokio::spawn(async move {
                             if let Err(e) = handle_incoming(stream, path, EventHandlerAdapter(h_c.clone()), lim, map).await {
                                 if is_dev {
                                     h_c.on_event(TransferEvent::Error { task_id: "incoming".into(), error: e.to_string() });
                                 } else {
                                     log::error!("Incoming connection failed: {}", e);
-                            }
+                                }
                             }
                         });
                     }
@@ -121,10 +198,11 @@ impl DropTeaCore {
         if let Some(rx) = rx_opt {
             let discovery = self.discovery.clone();
             let device_id = self.node_name.clone(); 
-            let is_dev = self.dev_mode;
             let h_discovery = self.handler.clone();
+            
             rt.spawn(async move {
-                if let Err(e) = discovery.start(device_id, port, is_dev, rx).await {
+                // 🟢 UPDATED: ใช้ Port จริงในการประกาศ Discovery
+                if let Err(e) = discovery.start(device_id, actual_port, rx).await {
                     h_discovery.on_event(TransferEvent::Error { task_id: "discovery".into(), error: e.to_string() });
                 }
             });
@@ -132,7 +210,8 @@ impl DropTeaCore {
     }
 
     pub fn send_file(&self, ip: String, port: u16, path: String, task_id: String, my_name: String, event_handler: Box<dyn TransferEventHandler>, target_os: Option<String>) {
-        let rt = self.rt.clone(); let transport = self.transport.clone();
+        let rt = self.rt.clone(); 
+        let transport = self.transport.clone();
         let h: Arc<Box<dyn TransferEventHandler>> = Arc::new(event_handler);
         let limiter = self.outgoing_limiter.clone();
         
